@@ -1,0 +1,150 @@
+"""
+SEC 8‑K New Product Announcement Extraction Using LLM
+
+Data Sources:
+    - Company Tickers URL: https://www.sec.gov/files/company_tickers.json
+    - SEC 8‑K Atom Feed URL Template:
+      https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type=8-K&count={count}&output=atom
+
+Assignment Requirements:
+    Extract and structure data in the following format (values separated by "|"):
+        Company Name | Stock Name | Filing Time | New Product | Product Description
+
+Methodology:
+    1. Download the company tickers JSON and obtain each company’s CIK.
+    2. Query the SEC Atom feed for 8‑K filings for each CIK.
+    3. Parse each filing entry to extract the filing time and the <summary> field.
+    4. Use a local LLM (via Ollama) to extract product announcement details by passing the summary with a custom prompt.
+    5. Save the extracted, structured data into a CSV file.
+    6. A custom test is included to verify the LLM query functionality on sample text.
+
+Note:
+    - Many SEC 8‑K filings do not include product announcements in the summary.
+    - In a full solution, more detailed parsing (e.g., full document text or exhibit sections) could improve extraction.
+"""
+
+import requests
+from bs4 import BeautifulSoup
+import subprocess
+import csv
+
+# Define HTTP headers for SEC requests.
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0",
+}
+
+# URL for company tickers and CIK numbers (provided by SEC).
+COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+
+
+# SEC Atom feed URL template for 8-K filings.
+def build_search_url(cik, count=10):
+    return f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik:010d}&type=8-K&count={count}&output=atom"
+
+
+# Function to query the local LLM via Ollama.
+def query_ollama(prompt):
+    command = f'echo "{prompt}" | ollama run llama3.2:latest'
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    stdout, stderr = process.communicate()
+    if process.returncode == 0:
+        return stdout.decode().strip()
+    else:
+        print("Error querying Ollama:", stderr.decode())
+        return None
+
+
+# Function to get 8-K filings XML for a given CIK.
+def get_filings(cik, count=10):
+    search_url = build_search_url(cik, count)
+    response = requests.get(search_url, headers=headers, timeout=10)
+    if response.ok:
+        return response.text
+    else:
+        print(f"Error fetching filings for CIK {cik}")
+        return None
+
+
+# Function to parse the SEC Atom feed and extract filing details.
+def parse_filings(filings_xml):
+    soup = BeautifulSoup(filings_xml, "xml")
+    entries = soup.find_all("entry")
+    filings_data = []
+    for entry in entries:
+        filing_time = entry.updated.get_text() if entry.updated else "N/A"
+        # The <summary> field often contains a brief description of the filing.
+        summary = entry.summary.get_text() if entry.summary else "No description"
+        filings_data.append({"filing_time": filing_time, "summary": summary})
+    return filings_data
+
+
+# Custom test function with sample text to verify the LLM query.
+def test_custom_text():
+    sample_text = "Apple Inc. has announced the new iPhone Solar, a revolutionary smartphone featuring solar charging capabilities."
+    prompt = (
+        "Extract details about any new product announcements from the text below.\n"
+        "Return the results in the following format:\n"
+        "Company Name | New Product | Product Description (limit description to 180 characters)\n"
+        'If there is no product announcement, respond with: "No new products mentioned."\n'
+        f"{sample_text}"
+    )
+    response = query_ollama(prompt)
+    print("Test LLM Response:", response)
+
+
+# Main pipeline function: Processes companies and filings.
+def main():
+    # Run the custom example test.
+    print("Running Custom Sample Test:")
+    test_custom_text()
+    print("\n--- Starting Full Pipeline on SEC Filings ---\n")
+
+    # Download company tickers JSON.
+    cik_data = requests.get(COMPANY_TICKERS_URL, headers=headers).json()
+
+    structured_data = []
+    # Process the first 100 companies (can be scaled or adjusted).
+    for company in list(cik_data.values())[:100]:
+        cik = int(company['cik_str'])
+        ticker = company['ticker']
+        # Get 8-K filings XML for this company.
+        filings_xml = get_filings(cik, count=10)
+        if filings_xml:
+            filings = parse_filings(filings_xml)
+            for filing in filings:
+                # Prepare prompt using the <summary> text from the filing.
+                prompt = (
+                    "Extract details about any new product announcements from the text below.\n"
+                    "Return the results in the following format:\n"
+                    "Company Name | New Product | Product Description (limit description to 180 characters)\n"
+                    'If there is no product announcement, respond with: "No new products mentioned."\n'
+                    f"{filing['summary']}"
+                )
+                ollama_response = query_ollama(prompt)
+                print(f"Ollama Response for company {ticker} at {filing['filing_time']}: {ollama_response}")
+
+                # Check and split the response if product details are present.
+                if ollama_response and "No new products mentioned." not in ollama_response:
+                    response_parts = ollama_response.split('|')
+                    if len(response_parts) == 3:
+                        extracted_company = response_parts[0].strip()
+                        new_product = response_parts[1].strip()
+                        product_description = response_parts[2].strip()
+                        structured_data.append([
+                            extracted_company, ticker, filing["filing_time"], new_product, product_description
+                        ])
+                    else:
+                        print(f"Unexpected response format: {ollama_response}")
+        else:
+            print(f"No filings found for CIK {cik}")
+
+    # Save the structured data to a CSV file.
+    with open("8k_filings_with_products.csv", "w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile, delimiter='|')
+        writer.writerow(["Company Name", "Stock Name", "Filing Time", "New Product", "Product Description"])
+        writer.writerows(structured_data)
+    print("Data saved to 8k_filings_with_products.csv")
+
+
+if __name__ == "__main__":
+    main()
