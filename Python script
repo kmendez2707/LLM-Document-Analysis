@@ -103,8 +103,8 @@ def main():
     cik_data = requests.get(COMPANY_TICKERS_URL, headers=headers).json()
 
     structured_data = []
-    # Process the first 100 companies (can be scaled or adjusted).
-    for company in list(cik_data.values())[:100]:
+    # Process the first 10 companies (can be scaled or adjusted).
+    for company in list(cik_data.values())[:10]:
         cik = int(company['cik_str'])
         ticker = company['ticker']
         # Get 8-K filings XML for this company.
